@@ -568,6 +568,18 @@ struct damon_attrs {
 	unsigned long max_nr_regions;
 };
 
+struct kdamond_struct {
+	struct mutex lock;
+	struct task_struct *self;
+	/* TODO: support multiple contexts */
+	struct damon_ctx *ctx;
+	size_t nr_ctxs;
+
+/* private: */
+	/* for waiting until the execution of the kdamond_fn is started */
+	struct completion kdamond_started;
+};
+
 /**
  * struct damon_ctx - Represents a context for each monitoring.  This is the
  * main interface that allows users to set the attributes and get the results
@@ -614,12 +626,9 @@ struct damon_ctx {
 	 * update
 	 */
 	unsigned long next_ops_update_sis;
-	/* for waiting until the execution of the kdamond_fn is started */
-	struct completion kdamond_started;
 
 /* public: */
-	struct task_struct *kdamond;
-	struct mutex kdamond_lock;
+	struct kdamond_struct *kdamond;
 
 	struct damon_operations ops;
 	struct damon_callback callback;
@@ -736,7 +745,10 @@ void damon_destroy_target(struct damon_target *t);
 unsigned int damon_nr_regions(struct damon_target *t);
 
 struct damon_ctx *damon_new_ctx(void);
+struct kdamond_struct *damon_new_kdamond(void);
 void damon_destroy_ctx(struct damon_ctx *ctx);
+void damon_destroy_kdamond(struct kdamond_struct *kdamond);
+bool damon_kdamond_running(struct kdamond_struct *kdamond);
 int damon_set_attrs(struct damon_ctx *ctx, struct damon_attrs *attrs);
 void damon_set_schemes(struct damon_ctx *ctx,
 			struct damos **schemes, ssize_t nr_schemes);
@@ -758,8 +770,8 @@ static inline unsigned int damon_max_nr_accesses(const struct damon_attrs *attrs
 }
 
 
-int damon_start(struct damon_ctx **ctxs, int nr_ctxs, bool exclusive);
-int damon_stop(struct damon_ctx **ctxs, int nr_ctxs);
+int damon_start(struct kdamond_struct *kdamond, bool exclusive);
+int damon_stop(struct kdamond_struct *kdamond);
 
 int damon_set_region_biggest_system_ram_default(struct damon_target *t,
 				unsigned long *start, unsigned long *end);
