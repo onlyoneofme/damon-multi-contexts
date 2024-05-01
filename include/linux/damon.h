@@ -572,7 +572,6 @@ struct kdamond_struct {
 	struct mutex lock;
 	struct task_struct *self;
 	struct list_head contexts;
-	size_t nr_ctxs;
 
 /* private: */
 	/* for waiting until the execution of the kdamond_fn is started */
@@ -626,6 +625,7 @@ struct damon_ctx {
 	 */
 	unsigned long next_ops_update_sis;
 	unsigned long sz_limit;
+	bool valid;
 
 /* public: */
 	struct kdamond_struct *kdamond;
@@ -671,6 +671,12 @@ static inline struct damon_target *damon_first_target(struct damon_ctx *ctx)
 static inline struct damon_ctx *damon_first_ctx(struct kdamond_struct *kdamond)
 {
 	return list_first_entry(&kdamond->contexts, struct damon_ctx, list);
+}
+
+static inline bool damon_is_last_ctx(struct damon_ctx *ctx,
+				     struct kdamond_struct *kdamond)
+{
+	return list_is_last(&ctx->list, &kdamond->contexts);
 }
 
 #define damon_for_each_region(r, t) \

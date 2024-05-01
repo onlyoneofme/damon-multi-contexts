@@ -5,6 +5,8 @@
  * Copyright (c) 2022 SeongJae Park <sj@kernel.org>
  */
 
+#define pr_fmt(fmt) "damon-sysfs: " fmt
+
 #include <linux/pid.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
@@ -897,8 +899,7 @@ static ssize_t nr_contexts_store(struct kobject *kobj,
 	err = kstrtoint(buf, 0, &nr);
 	if (err)
 		return err;
-	/* TODO: support multiple contexts per kdamond */
-	if (nr < 0 || 1 < nr)
+	if (nr < 0)
 		return -EINVAL;
 
 	contexts = container_of(kobj, struct damon_sysfs_contexts, kobj);
@@ -1381,23 +1382,48 @@ static int damon_sysfs_apply_inputs(struct damon_ctx *ctx,
  */
 static int damon_sysfs_commit_input(struct damon_sysfs_kdamond *sys_kdamond)
 {
+	unsigned long ctx_id = 0;
 	struct damon_ctx *c;
-	struct damon_sysfs_context *sysfs_ctx;
+	struct damon_sysfs_context **sysfs_ctxs;
 	int err;
 
 	if (!damon_sysfs_kdamond_running(sys_kdamond))
 		return -EINVAL;
-	/* TODO: Support multiple contexts per kdamond */
-	if (sys_kdamond->contexts->nr != 1)
-		return -EINVAL;
 
-	sysfs_ctx = sys_kdamond->contexts->contexts_arr[0];
+	sysfs_ctxs = sys_kdamond->contexts->contexts_arr;
 	damon_for_each_context(c, sys_kdamond->kdamond) {
+		struct damon_sysfs_context *sysfs_ctx = *sysfs_ctxs;
+		struct damon_sysfs_intervals *sys_intervals =
+			sysfs_ctx->attrs->intervals;;
+
+		if (sys_kdamond->contexts->nr > 1 &&
+				sys_intervals->sample_us != c->attrs.sample_interval) {
+			pr_err("context_id=%lu: "
+				"multiple contexts must have equal sample_interval\n",
+					ctx_id);
+			/*
+			 * since multiple contexts expect equal
+			 * sample_intervals, try to fix it here
+			 */
+			sys_intervals->sample_us = c->attrs.sample_interval;
+		}
+
 		err = damon_sysfs_apply_inputs(c, sysfs_ctx);
 		if (err)
 			return err;
-		++sysfs_ctx;
+		++sysfs_ctxs;
+
+		/* sysfs_ctx may be NIL, so check if it is the last */
+		if (sys_kdamond->contexts->nr > 1 && sysfs_ctxs &&
+				!damon_is_last_ctx(c, sys_kdamond->kdamond)) {
+			sysfs_ctx = *sysfs_ctxs;
+			sys_intervals = sysfs_ctx->attrs->intervals;
+			/* We somehow failed in fixing sample_interval above */
+			BUG_ON(sys_intervals->sample_us != c->attrs.sample_interval);
+		}
+		++ctx_id;
 	}
+
 	return 0;
 }
 
@@ -1409,9 +1435,6 @@ static int damon_sysfs_commit_schemes_quota_goals(
 	int err;
 
 	if (!damon_sysfs_kdamond_running(sysfs_kdamond))
-		return -EINVAL;
-	/* TODO: Support multiple contexts per kdamond */
-	if (sysfs_kdamond->contexts->nr != 1)
 		return -EINVAL;
 
 	sysfs_ctxs = sysfs_kdamond->contexts->contexts_arr;
@@ -1613,9 +1636,6 @@ static int damon_sysfs_turn_damon_on(struct damon_sysfs_kdamond *sys_kdamond)
 		return -EBUSY;
 	if (damon_sysfs_cmd_request.kdamond == sys_kdamond)
 		return -EBUSY;
-	/* TODO: support multiple contexts per kdamond */
-	if (sys_kdamond->contexts->nr != 1)
-		return -EINVAL;
 
 	if (sys_kdamond->kdamond)
 		damon_destroy_kdamond(sys_kdamond->kdamond);
