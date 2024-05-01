@@ -24,7 +24,7 @@
 #endif
 
 static DEFINE_MUTEX(damon_lock);
-static int nr_running_ctxs;
+static int nr_running_kdamonds;
 static bool running_exclusive_ctxs;
 
 static DEFINE_MUTEX(damon_ops_lock);
@@ -707,13 +707,13 @@ void damon_set_schemes(struct damon_ctx *ctx, struct damos **schemes,
  */
 int damon_nr_running_ctxs(void)
 {
-	int nr_ctxs;
+	int nr_kdamonds;
 
 	mutex_lock(&damon_lock);
-	nr_ctxs = nr_running_ctxs;
+	nr_kdamonds = nr_running_kdamonds;
 	mutex_unlock(&damon_lock);
 
-	return nr_ctxs;
+	return nr_kdamonds;
 }
 
 /**
@@ -769,7 +769,7 @@ static int __damon_start(struct kdamond_struct *kdamond)
 		err = 0;
 		reinit_completion(&kdamond->kdamond_started);
 		kdamond->self = kthread_run(kdamond_fn, kdamond, "kdamond.%d",
-				nr_running_ctxs);
+				nr_running_kdamonds);
 		if (IS_ERR(kdamond->self)) {
 			err = PTR_ERR(kdamond->self);
 			kdamond->self = NULL;
@@ -808,7 +808,7 @@ int damon_start(struct kdamond_struct *kdamond, bool exclusive)
 		return -EINVAL;
 
 	mutex_lock(&damon_lock);
-	if ((exclusive && nr_running_ctxs) ||
+	if ((exclusive && nr_running_kdamonds) ||
 			(!exclusive && running_exclusive_ctxs)) {
 		mutex_unlock(&damon_lock);
 		return -EBUSY;
@@ -817,9 +817,9 @@ int damon_start(struct kdamond_struct *kdamond, bool exclusive)
 	err = __damon_start(kdamond);
 	if (err)
 		return err;
-	nr_running_ctxs++;
+	nr_running_kdamonds++;
 
-	if (exclusive && nr_running_ctxs)
+	if (exclusive && nr_running_kdamonds)
 		running_exclusive_ctxs = true;
 	mutex_unlock(&damon_lock);
 
@@ -1755,8 +1755,8 @@ done:
 	mutex_unlock(&kdamond->lock);
 
 	mutex_lock(&damon_lock);
-	nr_running_ctxs--;
-	if (!nr_running_ctxs && running_exclusive_ctxs)
+	nr_running_kdamonds--;
+	if (!nr_running_kdamonds && running_exclusive_ctxs)
 		running_exclusive_ctxs = false;
 	mutex_unlock(&damon_lock);
 
