@@ -571,8 +571,7 @@ struct damon_attrs {
 struct kdamond_struct {
 	struct mutex lock;
 	struct task_struct *self;
-	/* TODO: support multiple contexts */
-	struct damon_ctx *ctx;
+	struct list_head contexts;
 	size_t nr_ctxs;
 
 /* private: */
@@ -626,9 +625,11 @@ struct damon_ctx {
 	 * update
 	 */
 	unsigned long next_ops_update_sis;
+	unsigned long sz_limit;
 
 /* public: */
 	struct kdamond_struct *kdamond;
+	struct list_head list;
 
 	struct damon_operations ops;
 	struct damon_callback callback;
@@ -662,6 +663,15 @@ static inline unsigned long damon_sz_region(struct damon_region *r)
 	return r->ar.end - r->ar.start;
 }
 
+static inline struct damon_target *damon_first_target(struct damon_ctx *ctx)
+{
+	return list_first_entry(&ctx->adaptive_targets, struct damon_target, list);
+}
+
+static inline struct damon_ctx *damon_first_ctx(struct kdamond_struct *kdamond)
+{
+	return list_first_entry(&kdamond->contexts, struct damon_ctx, list);
+}
 
 #define damon_for_each_region(r, t) \
 	list_for_each_entry(r, &t->regions_list, list)
@@ -683,6 +693,12 @@ static inline unsigned long damon_sz_region(struct damon_region *r)
 
 #define damon_for_each_scheme_safe(s, next, ctx) \
 	list_for_each_entry_safe(s, next, &(ctx)->schemes, list)
+
+#define damon_for_each_context(c, kdamond) \
+	list_for_each_entry(c, &(kdamond)->contexts, list)
+
+#define damon_for_each_context_safe(c, next, kdamond) \
+	list_for_each_entry_safe(c, next, &(kdamond)->contexts, list)
 
 #define damos_for_each_quota_goal(goal, quota) \
 	list_for_each_entry(goal, &quota->goals, list)
@@ -745,8 +761,10 @@ void damon_destroy_target(struct damon_target *t);
 unsigned int damon_nr_regions(struct damon_target *t);
 
 struct damon_ctx *damon_new_ctx(void);
+void damon_add_ctx(struct kdamond_struct *kdamond, struct damon_ctx *ctx);
 struct kdamond_struct *damon_new_kdamond(void);
 void damon_destroy_ctx(struct damon_ctx *ctx);
+void damon_destroy_ctxs(struct kdamond_struct *kdamond);
 void damon_destroy_kdamond(struct kdamond_struct *kdamond);
 bool damon_kdamond_running(struct kdamond_struct *kdamond);
 int damon_set_attrs(struct damon_ctx *ctx, struct damon_attrs *attrs);

@@ -502,8 +502,15 @@ struct damon_ctx *damon_new_ctx(void)
 
 	INIT_LIST_HEAD(&ctx->adaptive_targets);
 	INIT_LIST_HEAD(&ctx->schemes);
+	INIT_LIST_HEAD(&ctx->list);
 
 	return ctx;
+}
+
+void damon_add_ctx(struct kdamond_struct *kdamond, struct damon_ctx *ctx)
+{
+	list_add_tail(&ctx->list, &kdamond->contexts);
+	++kdamond->nr_ctxs;
 }
 
 struct kdamond_struct *damon_new_kdamond(void)
@@ -516,6 +523,8 @@ struct kdamond_struct *damon_new_kdamond(void)
 
 	init_completion(&kdamond->kdamond_started);
 	mutex_init(&kdamond->lock);
+
+	INIT_LIST_HEAD(&kdamond->contexts);
 
 	return kdamond;
 }
@@ -533,6 +542,11 @@ static void damon_destroy_targets(struct damon_ctx *ctx)
 		damon_destroy_target(t);
 }
 
+static inline void damon_del_ctx(struct damon_ctx *ctx)
+{
+	list_del(&ctx->list);
+}
+
 void damon_destroy_ctx(struct damon_ctx *ctx)
 {
 	struct damos *s, *next_s;
@@ -542,12 +556,21 @@ void damon_destroy_ctx(struct damon_ctx *ctx)
 	damon_for_each_scheme_safe(s, next_s, ctx)
 		damon_destroy_scheme(s);
 
+	damon_del_ctx(ctx);
 	kfree(ctx);
+}
+
+void damon_destroy_ctxs(struct kdamond_struct *kdamond)
+{
+	struct damon_ctx *c, *next;
+
+	damon_for_each_context_safe(c, next, kdamond)
+		damon_destroy_ctx(c);
 }
 
 void damon_destroy_kdamond(struct kdamond_struct *kdamond)
 {
-	damon_destroy_ctx(kdamond->ctx);
+	damon_destroy_ctxs(kdamond);
 	mutex_destroy(&kdamond->lock);
 	kfree(kdamond);
 }
@@ -1596,29 +1619,67 @@ static void kdamond_init_intervals_sis(struct damon_ctx *ctx)
 	}
 }
 
+static bool kdamond_init_ctx(struct damon_ctx *ctx)
+{
+	if (ctx->ops.init)
+		ctx->ops.init(ctx);
+	if (ctx->callback.before_start && ctx->callback.before_start(ctx))
+		return false;
+
+	kdamond_init_intervals_sis(ctx);
+	ctx->sz_limit = damon_region_sz_limit(ctx);
+
+	return true;
+}
+
+static bool kdamond_init_ctxs(struct kdamond_struct *kdamond)
+{
+	struct damon_ctx *c;
+
+	damon_for_each_context(c, kdamond)
+		if (!kdamond_init_ctx(c))
+			return false;
+	return true;
+}
+
+static void kdamond_finish_ctx(struct damon_ctx *ctx)
+{
+	struct damon_target *t;
+	struct damon_region *r, *next;
+
+	damon_for_each_target(t, ctx) {
+		damon_for_each_region_safe(r, next, t)
+			damon_destroy_region(r, t);
+	}
+
+	if (ctx->callback.before_terminate)
+		ctx->callback.before_terminate(ctx);
+	if (ctx->ops.cleanup)
+		ctx->ops.cleanup(ctx);
+}
+
+static void kdamond_finish_ctxs(struct kdamond_struct *kdamond)
+{
+	struct damon_ctx *c;
+
+	damon_for_each_context(c, kdamond)
+		kdamond_finish_ctx(c);
+}
+
 /*
  * The monitoring daemon that runs as a kernel thread
  */
 static int kdamond_fn(void *data)
 {
 	struct kdamond_struct *kdamond = data;
-	struct damon_ctx *ctx = kdamond->ctx;
-	struct damon_target *t;
-	struct damon_region *r, *next;
+	struct damon_ctx *ctx = damon_first_ctx(kdamond);
 	unsigned int max_nr_accesses = 0;
-	unsigned long sz_limit = 0;
 
 	pr_debug("kdamond (%d) starts\n", current->pid);
 
 	complete(&kdamond->kdamond_started);
-	kdamond_init_intervals_sis(ctx);
-
-	if (ctx->ops.init)
-		ctx->ops.init(ctx);
-	if (ctx->callback.before_start && ctx->callback.before_start(ctx))
+	if (!kdamond_init_ctxs(kdamond))
 		goto done;
-
-	sz_limit = damon_region_sz_limit(ctx);
 
 	while (!kdamond_need_stop(ctx)) {
 		/*
@@ -1631,6 +1692,7 @@ static int kdamond_fn(void *data)
 		unsigned long next_aggregation_sis = ctx->next_aggregation_sis;
 		unsigned long next_ops_update_sis = ctx->next_ops_update_sis;
 		unsigned long sample_interval = ctx->attrs.sample_interval;
+		unsigned long sz_limit = ctx->sz_limit;
 
 		if (kdamond_wait_activation(ctx))
 			break;
@@ -1681,19 +1743,11 @@ static int kdamond_fn(void *data)
 				sample_interval;
 			if (ctx->ops.update)
 				ctx->ops.update(ctx);
-			sz_limit = damon_region_sz_limit(ctx);
+			ctx->sz_limit = damon_region_sz_limit(ctx);
 		}
 	}
 done:
-	damon_for_each_target(t, ctx) {
-		damon_for_each_region_safe(r, next, t)
-			damon_destroy_region(r, t);
-	}
-
-	if (ctx->callback.before_terminate)
-		ctx->callback.before_terminate(ctx);
-	if (ctx->ops.cleanup)
-		ctx->ops.cleanup(ctx);
+	kdamond_finish_ctxs(kdamond);
 
 	pr_debug("kdamond (%d) finishes\n", current->pid);
 	mutex_lock(&kdamond->lock);
