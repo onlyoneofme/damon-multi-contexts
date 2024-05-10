@@ -865,7 +865,7 @@ int damon_stop(struct kdamond_struct *kdamond)
 /*
  * Reset the aggregated monitoring results ('nr_accesses' of each region).
  */
-static void kdamond_reset_aggregated(struct damon_ctx *c)
+static void kdamond_reset_aggregated(struct damon_ctx *c, unsigned int ci)
 {
 	struct damon_target *t;
 	unsigned int ti = 0;	/* target's index */
@@ -874,7 +874,7 @@ static void kdamond_reset_aggregated(struct damon_ctx *c)
 		struct damon_region *r;
 
 		damon_for_each_region(r, t) {
-			trace_damon_aggregated(ti, r, damon_nr_regions(t));
+			trace_damon_aggregated(ci, ti, r, damon_nr_regions(t));
 			r->last_nr_accesses = r->nr_accesses;
 			r->nr_accesses = 0;
 		}
@@ -1041,21 +1041,15 @@ static bool damos_filter_out(struct damon_ctx *ctx, struct damon_target *t,
 	return false;
 }
 
-static void damos_apply_scheme(struct damon_ctx *c, struct damon_target *t,
-		struct damon_region *r, struct damos *s)
+static void damos_apply_scheme(unsigned int cidx, struct damon_ctx *c,
+			       struct damon_target *t, struct damon_region *r,
+			       struct damos *s)
 {
 	struct damos_quota *quota = &s->quota;
 	unsigned long sz = damon_sz_region(r);
 	struct timespec64 begin, end;
 	unsigned long sz_applied = 0;
 	int err = 0;
-	/*
-	 * We plan to support multiple context per kdamond, as DAMON sysfs
-	 * implies with 'nr_contexts' file.  Nevertheless, only single context
-	 * per kdamond is supported for now.  So, we can simply use '0' context
-	 * index here.
-	 */
-	unsigned int cidx = 0;
 	struct damos *siter;		/* schemes iterator */
 	unsigned int sidx = 0;
 	struct damon_target *titer;	/* targets iterator */
@@ -1111,7 +1105,8 @@ update_stat:
 	damos_update_stat(s, sz, sz_applied);
 }
 
-static void damon_do_apply_schemes(struct damon_ctx *c,
+static void damon_do_apply_schemes(unsigned int ctx_id,
+				   struct damon_ctx *c,
 				   struct damon_target *t,
 				   struct damon_region *r)
 {
@@ -1136,7 +1131,7 @@ static void damon_do_apply_schemes(struct damon_ctx *c,
 		if (!damos_valid_target(c, t, r, s))
 			continue;
 
-		damos_apply_scheme(c, t, r, s);
+		damos_apply_scheme(ctx_id, c, t, r, s);
 	}
 }
 
@@ -1317,7 +1312,7 @@ static void damos_adjust_quota(struct damon_ctx *c, struct damos *s)
 	quota->min_score = score;
 }
 
-static void kdamond_apply_schemes(struct damon_ctx *c)
+static void kdamond_apply_schemes(struct damon_ctx *c, unsigned int ctx_id)
 {
 	struct damon_target *t;
 	struct damon_region *r, *next_r;
@@ -1343,7 +1338,7 @@ static void kdamond_apply_schemes(struct damon_ctx *c)
 
 	damon_for_each_target(t, c) {
 		damon_for_each_region_safe(r, next_r, t)
-			damon_do_apply_schemes(c, t, r);
+			damon_do_apply_schemes(ctx_id, c, t, r);
 	}
 
 	damon_for_each_scheme(s, c) {
@@ -1696,7 +1691,6 @@ static bool kdamond_prepare_access_checks_ctx(struct damon_ctx *ctx,
 			ctx->callback.after_sampling(ctx))
 		goto invalidate_ctx;
 	*sample_interval = ctx->attrs.sample_interval;
-	ctx->prepared = true;
 	return true;
 invalidate_ctx:
 	ctx->valid = false;
@@ -1718,6 +1712,7 @@ static int kdamond_fn(void *data)
 		goto done;
 
 	while (!kdamond_need_stop()) {
+		unsigned int ctx_id = 0;
 		unsigned long nr_valid_ctxs = 0;
 		unsigned long min_wait_time = 0;
 		unsigned long sample_interval = 0;
@@ -1773,7 +1768,7 @@ static int kdamond_fn(void *data)
 			 * possible, to reduce overhead
 			 */
 			if (!list_empty(&ctx->schemes))
-				kdamond_apply_schemes(ctx);
+				kdamond_apply_schemes(ctx, ctx_id);
 
 			if (ctx->passed_sample_intervals == next_aggregation_sis) {
 				ctx->next_aggregation_sis = next_aggregation_sis +
